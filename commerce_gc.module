@@ -1,0 +1,215 @@
+<?php
+
+/**
+ * @file
+ * Implements Google Checkout payment method in Commerce module
+ */
+
+/**
+ * Implements hook_commerce_payment_method_info().
+ */
+function commerce_gc_commerce_payment_method_info() {
+  $payment_methods = array();
+
+  $payment_methods['commerce_gc'] = array(
+    'title' => t('Google Checkout'),
+    'short_title' => t('Google Checkout'),
+    'description' => t('Google Checkout payment method'),
+    'terminal' => FALSE,
+    'offsite' => TRUE,
+    'active' => TRUE,
+    'offsite_autoredirect' => TRUE,
+  );
+
+  return $payment_methods;
+}
+
+/**
+ * Payment method callback: settings form.
+ */
+function commerce_gc_settings_form($settings = NULL) {
+  $form = array();
+
+  // Merge default settings into the stored settings array.
+  $default_currency = variable_get('commerce_default_currency', 'USD');
+
+  $settings = (array) $settings + array(
+    'merchant_id' => '',
+    'merchant_key' => '',
+    'business' => '',
+    'currency_code' => in_array($default_currency, array_keys(commerce_gc_currencies())) ? $default_currency : 'USD',
+    'language' => 'US',
+    'server' => 'sandbox'
+  );
+  
+  $form['merchant_id'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Google Checkout MERCHANT_ID'),
+    '#description' => t('The merchant account id.'),
+    '#default_value' => $settings['merchant_id'],
+    '#required' => TRUE,
+  );
+  $form['merchant_key'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Google Checkout MERCHANT_KEY'),
+    '#description' => t('The merchant account key.'),
+    '#default_value' => $settings['merchant_key'],
+    '#required' => TRUE,
+  );
+  $form['business'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Google Checkout merchant e-mail address'),
+    '#description' => t('The e-mail address you use for the merchant account you want to receive payments.'),
+    '#default_value' => $settings['business'],
+    '#required' => TRUE,
+  );
+  $form['currency_code'] = array(
+    '#type' => 'select',
+    '#title' => t('Currency code'),
+    '#description' => t('Transactions can only be processed in one of the listed currencies.'),
+    '#options' => commerce_gc_currencies(),
+    '#default_value' => $settings['currency_code'],
+  );
+  $form['language'] = array(
+    '#type' => 'select',
+    '#title' => t('Google Checkout login page language'),
+    '#options' => commerce_gc_languages(),
+    '#default_value' => $settings['language'],
+  );
+  $form['server'] = array(
+    '#type' => 'radios',
+    '#title' => t('Google Checkout server'),
+    '#options' => array(
+      'sandbox' => ('Sandbox - use for testing, requires a Google Checkout Sandbox account'),
+      'live' => ('Live - use for processing real transactions'),
+    ),
+    '#default_value' => $settings['server'],
+  );
+
+  return $form;
+}
+
+/**
+ * Payment method callback: redirect form.
+ */
+function commerce_gc_redirect_form($form, &$form_state, $order, $payment_method) {
+
+  $settings = array(
+    // Return to the previous page when payment is canceled
+    'cancel_return' => url('checkout/' . $order->order_id . '/payment/back/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+
+    // Return to the payment redirect page for processing successful payments
+    'return' => url('checkout/' . $order->order_id . '/payment/return/' . $order->data['payment_redirect_key'], array('absolute' => TRUE)),
+
+    // Specify the current payment method instance ID in the notify_url
+    'payment_method' => $payment_method['instance_id'],
+  );
+  
+  return commerce_gc_order_form($form, $form_state, $order, $payment_method['settings'] + $settings);
+  
+}
+
+/**
+ * Builds a Google Checkout form from an order object.
+ *
+ * @param $order
+ *   The fully loaded order being paid for.
+ * @param $settings
+ *   An array of settings used to build out the form, including:
+ *   - MERCHANT_ID
+ *   - MERCHANT_KEY
+ *   - currency_code
+ *   - language
+ *   - Email of Merchant (unsued atm)
+ *
+ * @return
+ *   A renderable form array.
+ */
+function commerce_gc_order_form($form, &$form_state, $order, $settings) {
+ 
+  $wrapper = entity_metadata_wrapper('commerce_order', $order);
+  $currency_code = $wrapper->commerce_order_total->currency_code->value();
+  $amount = $wrapper->commerce_order_total->amount->value();
+
+  // Ensure a default value for the payment_method setting.
+  $settings += array('payment_method' => '');
+
+//print 'COMMERCE_GC_ORDER_FORM<pre>';
+//print_r($settings); exit;
+
+    $itemsXML = '';
+    foreach ($wrapper->commerce_line_items as $delta => $line_item_wrapper) {
+        $itemsXML .= '<item>
+            <item-name>'. htmlentities($line_item_wrapper->commerce_product->title->value()) .'</item-name>
+            <item-description>'. htmlentities($line_item_wrapper->commerce_product->title->value()) .'</item-description>
+            <unit-price currency="'.$currency_code.'">'. commerce_currency_amount_to_decimal($line_item_wrapper->commerce_unit_price->amount->value(), 'GBP') .'</unit-price>
+            <quantity>'.round($line_item_wrapper->quantity->value()).'</quantity>
+          </item>';
+    }
+  
+    $sXML = '<?xml version="1.0" encoding="UTF-8"?>
+    <checkout-shopping-cart xmlns="http://checkout.google.com/schema/2">
+      <shopping-cart>
+        <items>
+    '.$itemsXML.'
+        </items>
+      </shopping-cart>
+      <checkout-flow-support>
+        <merchant-checkout-flow-support>
+          <continue-shopping-url>
+            '.$settings['return'].'
+          </continue-shopping-url>
+        </merchant-checkout-flow-support>
+      </checkout-flow-support>
+    </checkout-shopping-cart>';
+/*
+          <shipping-methods>
+            <flat-rate-shipping name="Standard">
+              <price currency="'.$currency_code.'">9.99</price>
+            </flat-rate-shipping>
+          </shipping-methods>
+*/
+//print $sXML;
+//print '<hr />';
+//exit;
+    
+    require_once 'library/googlerequest.php';
+    $r = new GoogleRequest($settings['merchant_id'], $settings['merchant_key'], $settings['server'], $settings['currency_code']);
+
+    list($status,$redirect_url) = $r->SendServer2ServerCart($sXML,false);
+    preg_match('/shoppingcart\=(\d+)$/',$redirect_url,$basket_id);
+    $data = array(
+      'o' => 'shoppingcart',
+      'shoppingcart' => $basket_id[1]
+    );
+    
+    preg_match('/^(.*)\?/',$redirect_url,$url);
+    $form['#action'] = $url[1];
+    
+    foreach ($data as $name => $value) {
+        if (!empty($value)) {
+            $form[$name] = array('#type' => 'hidden', '#value' => $value);
+        }
+    }
+    
+    $form['submit'] = array(
+      '#type' => 'submit',
+      '#value' => t('Proceed to Google Checkout'),
+    );
+    
+    return $form;
+}
+
+/**
+ * Returns an array of all possible language codes.
+ */
+function commerce_gc_languages() {
+  return drupal_map_assoc(array('AU', 'DE', 'FR', 'IT', 'GB', 'ES', 'US'));
+}
+
+/**
+ * Returns an array of all possible currency codes.
+ */
+function commerce_gc_currencies() {
+  return drupal_map_assoc(array('AUD', 'BRL', 'CAD', 'CHF', 'CZK', 'DKK', 'EUR', 'GBP', 'HKD', 'HUF', 'ILS', 'JPY', 'MXN', 'MYR', 'NOK', 'NZD', 'PHP', 'PLN', 'SEK', 'SGD', 'THB', 'TWD', 'USD'));
+}
